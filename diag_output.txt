@@ -1,3 +1,5 @@
+DIAG RUN 2026-10-31T23:49:45.244880+02:00
+
 DIAG FAILED: Page.goto: net::ERR_CONNECTION_RESET at https://www.egx.com.eg/ar/Indices.aspx
 Call log:
   - navigating to "https://www.egx.com.eg/ar/Indices.aspx", waiting until "domcontentloaded"
