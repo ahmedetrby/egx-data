@@ -287,7 +287,37 @@ async def main():
                     await ctx.close()
         await browser.close()
 
-    df = upsert_csv(HISTORY_CSV, [history_row(data[1], today)],
+    # ---- sanity guards: never archive a stale or broken snapshot ----
+    new_hist = history_row(data[1], today)
+    # (a) Totals identical to the previous recorded day = no new session
+    #     (weekend / holiday / manual re-run): succeed without writing.
+    if os.path.exists(HISTORY_CSV):
+        prev = pd.read_csv(HISTORY_CSV, encoding="utf-8-sig")
+        prev = prev[prev["تاريخ"].astype(str) != today]
+        if len(prev):
+            last = prev.iloc[-1]
+            value_cols = [c for c in new_hist if c != "تاريخ"]
+            if all(float(new_hist[c]) == float(last[c]) for c in value_cols):
+                print(f"No new session data: totals identical to "
+                      f"{last['تاريخ']}. Nothing written.")
+                return
+    # (b) Indices must be complete and plausible vs the last recorded
+    #     close; a broken parse (e.g. the weekend page layout) fails loudly.
+    closes = [indices["EGX30"], indices["EGX70"], indices["EGX100"]]
+    if any(v is None for v in closes):
+        print(f"Indices incomplete: {indices}. Nothing written.")
+        sys.exit(1)
+    if os.path.exists(INDICES_CSV):
+        prev_idx = pd.read_csv(INDICES_CSV, encoding="utf-8-sig")
+        prev_idx = prev_idx[prev_idx["تاريخ"].astype(str) != today]
+        if len(prev_idx):
+            last30 = float(prev_idx.iloc[-1]["EGX30_اغلاق"])
+            if not (0.8 * last30 <= indices["EGX30"] <= 1.2 * last30):
+                print(f"EGX30 close {indices['EGX30']} implausible vs last "
+                      f"{last30}. Nothing written.")
+                sys.exit(1)
+
+    df = upsert_csv(HISTORY_CSV, [new_hist],
                     ["تاريخ"], ["تاريخ"])
     print(f"{HISTORY_CSV}: saved {today}. Total days: {len(df)}")
 
