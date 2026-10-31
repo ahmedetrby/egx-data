@@ -261,7 +261,7 @@ async def run_diag(browser):
     WebService.asmx (esp. getIndexChartData / getIndexData parameters),
     then commit the capture to diag_output.txt. Never raises."""
     import subprocess
-    lines = []
+    lines = [f"DIAG RUN {datetime.now(CAIRO).isoformat()}"]
     try:
         ctx, _warm = await open_egx_page(browser)
         page = await ctx.new_page()
@@ -281,8 +281,18 @@ async def run_diag(browser):
                 resps.append(f"RESP {resp.status} {resp.url}\n{body[:600]}")
         page.on("response", lambda r: asyncio.create_task(on_resp(r)))
 
-        await page.goto(INDICES_PAGE, wait_until="domcontentloaded",
-                        timeout=30000)
+        last_goto_err = None
+        for _try in range(4):
+            try:
+                await page.goto(INDICES_PAGE,
+                                wait_until="domcontentloaded", timeout=30000)
+                last_goto_err = None
+                break
+            except Exception as e:
+                last_goto_err = e
+                await asyncio.sleep(15)
+        if last_goto_err is not None:
+            raise last_goto_err
         await asyncio.sleep(10)
         html = await page.content()
         for term in ("gtk", "getIndexChartData", "getIndexData",
@@ -320,6 +330,7 @@ async def run_diag(browser):
         await ctx.close()
     except Exception as e:
         lines.append(f"DIAG FAILED: {e}")
+    print("\n\n".join(lines), flush=True)
     try:
         with open("diag_output.txt", "w", encoding="utf-8") as f:
             f.write("\n\n".join(lines))
