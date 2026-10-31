@@ -263,7 +263,7 @@ async def run_diag(browser):
     import subprocess
     lines = []
     try:
-        ctx = await browser.new_context(ignore_https_errors=True)
+        ctx, _warm = await open_egx_page(browser)
         page = await ctx.new_page()
         reqs, resps = [], []
 
