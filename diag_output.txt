@@ -1,0 +1,3 @@
+DIAG FAILED: Page.goto: net::ERR_CONNECTION_RESET at https://www.egx.com.eg/ar/Indices.aspx
+Call log:
+  - navigating to "https://www.egx.com.eg/ar/Indices.aspx", waiting until "domcontentloaded"
