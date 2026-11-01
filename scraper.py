@@ -256,95 +256,6 @@ def proxy_from_env():
     return proxy
 
 
-async def run_diag(browser):
-    """TEMPORARY diagnostics: capture how the Indices page itself calls
-    WebService.asmx (esp. getIndexChartData / getIndexData parameters),
-    then commit the capture to diag_output.txt. Never raises."""
-    import subprocess
-    lines = [f"DIAG RUN {datetime.now(CAIRO).isoformat()}"]
-    try:
-        ctx, _warm = await open_egx_page(browser)
-        page = await ctx.new_page()
-        reqs, resps = [], []
-
-        def on_req(r):
-            if "asmx" in r.url or r.resource_type in ("xhr", "fetch"):
-                reqs.append(f"REQ {r.method} {r.url}")
-        page.on("request", on_req)
-
-        async def on_resp(resp):
-            if "asmx" in resp.url:
-                try:
-                    body = await resp.text()
-                except Exception:
-                    body = "<unreadable>"
-                resps.append(f"RESP {resp.status} {resp.url}\n{body[:600]}")
-        page.on("response", lambda r: asyncio.create_task(on_resp(r)))
-
-        last_goto_err = None
-        for _try in range(4):
-            try:
-                await page.goto(INDICES_PAGE,
-                                wait_until="domcontentloaded", timeout=30000)
-                last_goto_err = None
-                break
-            except Exception as e:
-                last_goto_err = e
-                await asyncio.sleep(15)
-        if last_goto_err is not None:
-            raise last_goto_err
-        await asyncio.sleep(10)
-        html = await page.content()
-        for term in ("gtk", "getIndexChartData", "getIndexData",
-                     "getIndexChartDDLData", "IndexChart"):
-            start, hits = 0, 0
-            while hits < 6:
-                i = html.find(term, start)
-                if i < 0:
-                    break
-                lines.append(
-                    f"HTML[{term}] ...{html[max(0, i - 200):i + 250]}...")
-                start, hits = i + 1, hits + 1
-        hidden = await page.evaluate(
-            "() => Array.from(document.querySelectorAll("
-            "'input[type=hidden]')).map(e => e.id + '=' + "
-            "(e.value || '').slice(0, 150))")
-        lines.append("HIDDEN: " + " | ".join(hidden))
-        perf = await page.evaluate(
-            "() => performance.getEntriesByType('resource')"
-            ".map(e => e.name)")
-        lines.append("RESOURCES:\n" + "\n".join(perf))
-        for target in ("lnkEGX70EWI", "lnkEGX100EWI"):
-            before = len(reqs)
-            try:
-                await page.evaluate(
-                    f"__doPostBack('ctl00$C$MI${target}', '')")
-            except Exception as e:
-                lines.append(f"POSTBACK {target} failed: {e}")
-            await asyncio.sleep(8)
-            lines.append(
-                f"AFTER {target}: new requests: {reqs[before:]}")
-        await asyncio.sleep(2)
-        lines.append("ALL REQUESTS:\n" + "\n".join(reqs))
-        lines.append("ALL RESPONSES:\n" + "\n\n".join(resps))
-        await ctx.close()
-    except Exception as e:
-        lines.append(f"DIAG FAILED: {e}")
-    print("\n\n".join(lines), flush=True)
-    try:
-        with open("diag_output.txt", "w", encoding="utf-8") as f:
-            f.write("\n\n".join(lines))
-        for cmd in (["git", "config", "user.name", "github-actions[bot]"],
-                    ["git", "config", "user.email",
-                     "github-actions[bot]@users.noreply.github.com"],
-                    ["git", "add", "diag_output.txt"],
-                    ["git", "commit", "-m", "diag: index API capture"],
-                    ["git", "push", "origin", "HEAD:main"]):
-            subprocess.run(cmd, check=False)
-    except Exception as e:
-        print(f"diag save failed: {e}")
-
-
 async def main():
     today = datetime.now(CAIRO).date().isoformat()
     print(f"Running for (Cairo): {today}")
@@ -354,7 +265,6 @@ async def main():
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
                   "--disable-blink-features=AutomationControlled"])
-        await run_diag(browser)
         last_err = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
             ctx = None
@@ -391,22 +301,6 @@ async def main():
                 print(f"No new session data: totals identical to "
                       f"{last['تاريخ']}. Nothing written.")
                 return
-    # (b) Indices must be complete and plausible vs the last recorded
-    #     close; a broken parse (e.g. the weekend page layout) fails loudly.
-    closes = [indices["EGX30"], indices["EGX70"], indices["EGX100"]]
-    if any(v is None for v in closes):
-        print(f"Indices incomplete: {indices}. Nothing written.")
-        sys.exit(1)
-    if os.path.exists(INDICES_CSV):
-        prev_idx = pd.read_csv(INDICES_CSV, encoding="utf-8-sig")
-        prev_idx = prev_idx[prev_idx["تاريخ"].astype(str) != today]
-        if len(prev_idx):
-            last30 = float(prev_idx.iloc[-1]["EGX30_اغلاق"])
-            if not (0.8 * last30 <= indices["EGX30"] <= 1.2 * last30):
-                print(f"EGX30 close {indices['EGX30']} implausible vs last "
-                      f"{last30}. Nothing written.")
-                sys.exit(1)
-
     df = upsert_csv(HISTORY_CSV, [new_hist],
                     ["تاريخ"], ["تاريخ"])
     print(f"{HISTORY_CSV}: saved {today}. Total days: {len(df)}")
@@ -423,14 +317,32 @@ async def main():
     allrows.to_csv(INSTRUMENTS_CSV, index=False, encoding="utf-8-sig")
     print(f"{INSTRUMENTS_CSV}: saved {today} ({len(rows)} rows).")
 
-    idx_row = {"تاريخ": today,
-               "EGX30_اغلاق": indices["EGX30"], "EGX30_تغير": indices["EGX30_pct"],
-               "EGX70_اغلاق": indices["EGX70"], "EGX70_تغير": indices["EGX70_pct"],
-               "EGX100_اغلاق": indices["EGX100"], "EGX100_تغير": indices["EGX100_pct"],
-               "دولار_شراء": cbe["USD_buy"], "دولار_بيع": cbe["USD_sell"],
-               "تاريخ_سعر_الدولار": cbe["USD_date"]}
-    upsert_csv(INDICES_CSV, [idx_row], ["تاريخ"], ["تاريخ"])
-    print(f"{INDICES_CSV}: saved {today}. indices={indices} cbe={cbe}")
+    # Indices are archived ONLY when complete and plausible vs the last
+    # recorded close; a broken indices read never blocks the investor
+    # data above and never reaches the archive itself.
+    closes = [indices["EGX30"], indices["EGX70"], indices["EGX100"]]
+    skip_reason = None
+    if any(v is None for v in closes):
+        skip_reason = f"incomplete: {indices}"
+    elif os.path.exists(INDICES_CSV):
+        prev_idx = pd.read_csv(INDICES_CSV, encoding="utf-8-sig")
+        prev_idx = prev_idx[prev_idx["تاريخ"].astype(str) != today]
+        if len(prev_idx):
+            last30 = float(prev_idx.iloc[-1]["EGX30_اغلاق"])
+            if not (0.8 * last30 <= indices["EGX30"] <= 1.2 * last30):
+                skip_reason = (f"EGX30 close {indices['EGX30']} implausible "
+                               f"vs last {last30}")
+    if skip_reason:
+        print(f"{INDICES_CSV}: indices SKIPPED ({skip_reason}).")
+    else:
+        idx_row = {"تاريخ": today,
+                   "EGX30_اغلاق": indices["EGX30"], "EGX30_تغير": indices["EGX30_pct"],
+                   "EGX70_اغلاق": indices["EGX70"], "EGX70_تغير": indices["EGX70_pct"],
+                   "EGX100_اغلاق": indices["EGX100"], "EGX100_تغير": indices["EGX100_pct"],
+                   "دولار_شراء": cbe["USD_buy"], "دولار_بيع": cbe["USD_sell"],
+                   "تاريخ_سعر_الدولار": cbe["USD_date"]}
+        upsert_csv(INDICES_CSV, [idx_row], ["تاريخ"], ["تاريخ"])
+        print(f"{INDICES_CSV}: saved {today}. indices={indices} cbe={cbe}")
 
 
 if __name__ == "__main__":
