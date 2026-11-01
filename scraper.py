@@ -156,9 +156,16 @@ async def fetch_indices(ctx):
                         timeout=30000)
         await asyncio.sleep(6)
         txt = await page.inner_text("body")
+        # NOTE: the plain EGP EGX30 detail block on this page has NO spaced
+        # "EGX 30" heading; the only spaced occurrence is the USD-denominated
+        # index line, so a bare find("EGX 30") matches the WRONG index
+        # (3,003 USD points instead of the EGP close). Skip any match that
+        # sits in the USD-index context.
         for label, key in (("EGX 30", "EGX30"), ("EGX 70", "EGX70"),
                            ("EGX 100", "EGX100")):
             i = txt.find(label)
+            while i >= 0 and "بالدولار" in txt[max(0, i - 10):i + 80]:
+                i = txt.find(label, i + 1)
             if i < 0:
                 continue
             window = txt[i:i + 300]
