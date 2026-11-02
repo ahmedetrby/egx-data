@@ -73,20 +73,43 @@ async def open_egx_page(browser):
         extra_http_headers={"Accept-Language": "ar,en-US;q=0.9"},
     )
     page = await ctx.new_page()
-    try:
-        await page.goto(PAGE, wait_until="domcontentloaded", timeout=30000)
-    except Exception:
-        pass
+    for _g in range(2):
+        try:
+            await page.goto(PAGE, wait_until="domcontentloaded",
+                            timeout=45000)
+            break
+        except Exception:
+            await asyncio.sleep(10)
     await asyncio.sleep(12)  # let the Imperva/TSPD challenge settle
     return ctx, page
 
 
 async def fetch_json(page, path):
-    res = await page.evaluate(JS_FETCH, BASE + path)
-    body = (res or {}).get("body", "")
-    if not body.strip().startswith("["):
-        raise ValueError(f"Bad response from {path}: {body[:120]!r}")
-    return json.loads(body)
+    """One endpoint, retried: EGX resets individual XHRs when it throttles,
+    so a single failed fetch must not kill the whole attempt. Waits grow
+    (5s, 10s, 15s) and the warm page is reloaded once mid-way to re-pass
+    the bot challenge."""
+    last_err = None
+    for i in range(4):
+        try:
+            res = await page.evaluate(JS_FETCH, BASE + path)
+            body = (res or {}).get("body", "")
+            if not body.strip().startswith("["):
+                raise ValueError(f"Bad response from {path}: {body[:120]!r}")
+            return json.loads(body)
+        except Exception as e:
+            last_err = e
+            if i == 3:
+                break
+            await asyncio.sleep(5 * (i + 1))
+            if i == 1:
+                try:
+                    await page.reload(wait_until="domcontentloaded",
+                                      timeout=60000)
+                    await asyncio.sleep(8)
+                except Exception:
+                    pass
+    raise last_err
 
 
 def check_nets(rows, label):
@@ -153,7 +176,7 @@ async def fetch_indices(ctx):
     page = await ctx.new_page()
     try:
         await page.goto(INDICES_PAGE, wait_until="domcontentloaded",
-                        timeout=30000)
+                        timeout=60000)
         await asyncio.sleep(6)
         txt = await page.inner_text("body")
         # NOTE: the plain EGP EGX30 detail block on this page has NO spaced
@@ -187,7 +210,7 @@ async def fetch_cbe(ctx):
     out = {"USD_buy": None, "USD_sell": None, "USD_date": None}
     page = await ctx.new_page()
     try:
-        await page.goto(CBE_PAGE, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(CBE_PAGE, wait_until="domcontentloaded", timeout=60000)
         await asyncio.sleep(4)
         txt = await page.inner_text("body")
         m = re.search(r"الأسعار لتاريخ:\s*([0-9/]+)", txt)
@@ -263,96 +286,6 @@ def proxy_from_env():
     return proxy
 
 
-async def run_diag(browser):
-    """TEMPORARY diagnostics: capture how the Indices page itself calls
-    WebService.asmx (esp. getIndexChartData / getIndexData parameters),
-    then commit the capture to diag_output.txt. Never raises."""
-    import subprocess
-    lines = [f"DIAG RUN {datetime.now(CAIRO).isoformat()}"]
-    try:
-        ctx, _warm = await open_egx_page(browser)
-        page = await ctx.new_page()
-        reqs, resps = [], []
-
-        def on_req(r):
-            if "asmx" in r.url or r.resource_type in ("xhr", "fetch"):
-                reqs.append(f"REQ {r.method} {r.url}")
-        page.on("request", on_req)
-
-        async def on_resp(resp):
-            if "asmx" in resp.url:
-                try:
-                    body = await resp.text()
-                except Exception:
-                    body = "<unreadable>"
-                resps.append(f"RESP {resp.status} {resp.url}\n{body[:600]}")
-        page.on("response", lambda r: asyncio.create_task(on_resp(r)))
-
-        last_goto_err = None
-        for _try in range(4):
-            try:
-                await page.goto(INDICES_PAGE,
-                                wait_until="domcontentloaded", timeout=30000)
-                last_goto_err = None
-                break
-            except Exception as e:
-                last_goto_err = e
-                await asyncio.sleep(15)
-        if last_goto_err is not None:
-            raise last_goto_err
-        await asyncio.sleep(10)
-        html = await page.content()
-        for term in ("gtk", "getIndexChartData", "getIndexData",
-                     "getIndexChartDDLData", "IndexChart"):
-            start, hits = 0, 0
-            back, fwd = (450, 450) if term == "gtk" else (200, 250)
-            while hits < 6:
-                i = html.find(term, start)
-                if i < 0:
-                    break
-                lines.append(
-                    f"HTML[{term}] ...{html[max(0, i - back):i + fwd]}...")
-                start, hits = i + 1, hits + 1
-        hidden = await page.evaluate(
-            "() => Array.from(document.querySelectorAll("
-            "'input[type=hidden]')).map(e => e.id + '=' + "
-            "(e.value || '').slice(0, 150))")
-        lines.append("HIDDEN: " + " | ".join(hidden))
-        perf = await page.evaluate(
-            "() => performance.getEntriesByType('resource')"
-            ".map(e => e.name)")
-        lines.append("RESOURCES:\n" + "\n".join(perf))
-        for target in ("lnkEGX70EWI", "lnkEGX100EWI"):
-            before = len(reqs)
-            try:
-                await page.evaluate(
-                    f"__doPostBack('ctl00$C$MI${target}', '')")
-            except Exception as e:
-                lines.append(f"POSTBACK {target} failed: {e}")
-            await asyncio.sleep(8)
-            lines.append(
-                f"AFTER {target}: new requests: {reqs[before:]}")
-        await asyncio.sleep(2)
-        lines.append("ALL REQUESTS:\n" + "\n".join(reqs))
-        lines.append("ALL RESPONSES:\n" + "\n\n".join(resps))
-        await ctx.close()
-    except Exception as e:
-        lines.append(f"DIAG FAILED: {e}")
-    print("\n\n".join(lines), flush=True)
-    try:
-        with open("diag_output.txt", "w", encoding="utf-8") as f:
-            f.write("\n\n".join(lines))
-        for cmd in (["git", "config", "user.name", "github-actions[bot]"],
-                    ["git", "config", "user.email",
-                     "github-actions[bot]@users.noreply.github.com"],
-                    ["git", "add", "diag_output.txt"],
-                    ["git", "commit", "-m", "diag: index API capture"],
-                    ["git", "push", "origin", "HEAD:main"]):
-            subprocess.run(cmd, check=False)
-    except Exception as e:
-        print(f"diag save failed: {e}")
-
-
 async def main():
     today = datetime.now(CAIRO).date().isoformat()
     print(f"Running for (Cairo): {today}")
@@ -362,7 +295,6 @@ async def main():
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
                   "--disable-blink-features=AutomationControlled"])
-        await run_diag(browser)
         last_err = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
             ctx = None
@@ -379,7 +311,7 @@ async def main():
                     await browser.close()
                     print("No data. Nothing written.")
                     sys.exit(1)
-                await asyncio.sleep(10)
+                await asyncio.sleep(60 * attempt)
             finally:
                 if ctx is not None:
                     await ctx.close()
