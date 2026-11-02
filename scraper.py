@@ -113,10 +113,13 @@ async def fetch_json(page, path):
 
 
 def check_nets(rows, label):
-    """The three nationality nets (total group) must cancel out."""
+    """The three nationality nets (total group) must exist and cancel out."""
     nets = [float(r.get("Net", 0) or 0) for r in rows
             if str(r.get("Group", "")) == "1"]
-    if len(nets) == 3 and abs(sum(nets)) > 1.0:
+    if len(nets) != 3:
+        raise ValueError(f"{label}: expected 3 total-group rows, "
+                         f"got {len(nets)}")
+    if abs(sum(nets)) > 1.0:
         raise ValueError(f"{label}: nets do not sum to zero: {nets}")
 
 
@@ -166,6 +169,10 @@ async def fetch_all(page):
     return data, shares
 
 
+# Arabic-Indic digits -> ASCII, for safe numeric parsing of page text
+_NUM_FIX = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
+
 # ---------- indices & CBE (best effort: blanks if a source fails) ----------
 
 async def fetch_indices(ctx):
@@ -179,6 +186,11 @@ async def fetch_indices(ctx):
                         timeout=60000)
         await asyncio.sleep(6)
         txt = await page.inner_text("body")
+        # Normalize digits and Unicode minus signs so the value/change
+        # regexes below always see plain ASCII numbers.
+        txt = (txt.translate(_NUM_FIX)
+               .replace("\u2212", "-").replace("\u2013", "-")
+               .replace("\u2014", "-"))
         # NOTE: the plain EGP EGX30 detail block on this page has NO spaced
         # "EGX 30" heading; the only spaced occurrence is the USD-denominated
         # index line, so a bare find("EGX 30") matches the WRONG index
@@ -240,7 +252,9 @@ def upsert_csv(path, new_rows, key_cols, sort_cols):
     else:
         df_all = df_new
     df_all = df_all.sort_values(sort_cols).reset_index(drop=True)
-    df_all.to_csv(path, index=False, encoding="utf-8-sig")
+    tmp_path = f"{path}.tmp"
+    df_all.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+    os.replace(tmp_path, path)
     return df_all
 
 
@@ -344,7 +358,9 @@ async def main():
     else:
         allrows = pd.DataFrame(rows)
     allrows = allrows.sort_values(["تاريخ", "أداة", "مجموعة"]).reset_index(drop=True)
-    allrows.to_csv(INSTRUMENTS_CSV, index=False, encoding="utf-8-sig")
+    tmp_inst = f"{INSTRUMENTS_CSV}.tmp"
+    allrows.to_csv(tmp_inst, index=False, encoding="utf-8-sig")
+    os.replace(tmp_inst, INSTRUMENTS_CSV)
     print(f"{INSTRUMENTS_CSV}: saved {today} ({len(rows)} rows).")
 
     # Indices are archived ONLY when complete and plausible vs the last
