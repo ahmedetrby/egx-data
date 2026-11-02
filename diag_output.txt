@@ -1,5 +1,0 @@
-DIAG RUN 2026-11-01T23:44:33.055083+02:00
-
-DIAG FAILED: Page.goto: Timeout 30000ms exceeded.
-Call log:
-  - navigating to "https://www.egx.com.eg/ar/Indices.aspx", waiting until "domcontentloaded"
